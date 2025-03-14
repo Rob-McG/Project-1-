@@ -1,0 +1,146 @@
+/*
+ * ProjectOne.cpp
+ *
+ * Created: 14/03/2025 11:35:18
+ * Author : Byrne
+ */ 
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <avr/cpufunc.h>
+
+#define HALF_SEC_COUNT 9766
+#define ADC_THRESHOLD 716  // Approx. 3.5V for 10-bit ADC (3.5V/5V * 1023)
+
+volatile uint16_t adc_result = 0;
+volatile uint8_t cylon_index = 0;
+volatile uint8_t direction = 1;  // 1 = right, 0 = left
+volatile uint8_t rtc_flag = 0;
+
+void CLOCK_init(void);
+void TCA0_init_bits(void);
+void ADC0_init(void);
+void InitialiseLED_PORT_bits(void);
+void InitialiseButton_PORT_bits(void);
+void Set_Clear_Ports(uint8_t set);
+void RTC_init(void);
+
+struct LED_BITS
+{
+	PORT_t *LED_PORT;
+	uint8_t bit_mapping;
+};
+
+struct LED_BITS LED_Array[10] = {
+	{&PORTC, PIN5_bm}, {&PORTC, PIN4_bm}, {&PORTA, PIN0_bm}, {&PORTF, PIN5_bm}, {&PORTC, PIN6_bm}, {&PORTB, PIN2_bm}, {&PORTF, PIN4_bm}, {&PORTA, PIN1_bm}, {&PORTA, PIN2_bm}, {&PORTA, PIN3_bm}
+};
+
+void CLOCK_init(void) {
+	ccp_write_io((void*)&CLKCTRL.MCLKCTRLB, (0 << CLKCTRL_PEN_bp));
+}
+
+void TCA0_init_bits(void) {
+	TCA0.SINGLE.INTCTRL = 0b00000001;
+	TCA0.SINGLE.CTRLB = 0b00000000;
+	TCA0.SINGLE.EVCTRL = 0b00000000;
+	TCA0.SINGLE.PER = HALF_SEC_COUNT;
+	TCA0.SINGLE.CTRLA = 0b00001111;
+}
+ISR(RTC_PIT_vect) {
+	RTC.PITINTFLAGS = RTC_PI_bm;
+	rtc_flag ^= 1;
+}
+void ADC0_init(void) {
+	ADC0.CTRLC = ADC_PRESC_DIV64_gc;
+	ADC0.CTRLA = ADC_ENABLE_bm | ADC_RESSEL_10BIT_gc | ADC_FREERUN_bm;
+	ADC0.MUXPOS = ADC_MUXPOS_AIN3_gc;
+	ADC0.INTCTRL = ADC_RESRDY_bm;
+	ADC0.COMMAND = ADC_STCONV_bm;
+}
+
+void InitialiseLED_PORT_bits(void) {
+	PORTC.DIR = PIN6_bm | PIN5_bm | PIN4_bm;
+	PORTA.DIR = PIN3_bm | PIN2_bm | PIN1_bm | PIN0_bm;
+	PORTB.DIR = PIN2_bm;
+	PORTF.DIR = PIN5_bm | PIN4_bm;
+}
+
+void InitialiseButton_PORT_bits(void) {
+	PORTE.DIRCLR = PIN1_bm;
+	PORTE.PIN1CTRL |= PORT_PULLUPEN_bm;
+}
+
+void Set_Clear_Ports(uint8_t set) {
+	for (uint8_t i = 0; i <= 9; i++) {
+		if (set)
+		LED_Array[i].LED_PORT->OUTSET = LED_Array[i].bit_mapping;
+		else
+		LED_Array[i].LED_PORT->OUTCLR = LED_Array[i].bit_mapping;
+	}
+}
+
+void RTC_init(void) {
+	RTC.CLKSEL = RTC_CLKSEL_INT1K_gc;
+	RTC.PITCTRLA = RTC_PERIOD_CYC32768_gc | RTC_PITEN_bm;
+	RTC.PITINTCTRL = RTC_PI_bm;
+}
+
+int main(void) {
+	CLOCK_init();
+	InitialiseLED_PORT_bits();
+	InitialiseButton_PORT_bits();
+	Set_Clear_Ports(0);
+	TCA0_init_bits();
+	ADC0_init();
+	RTC_init();
+	sei();
+	
+	while (1) {
+		if (!(PORTE.IN & PIN1_bm)) {
+			if (rtc_flag = 0){
+				uint8_t led_count = adc_result * 10 / 1023;
+				Set_Clear_Ports(0);
+				for (uint8_t i = 0; i < led_count; i++) {
+					LED_Array[i].LED_PORT->OUTSET = LED_Array[i].bit_mapping;
+			} else {
+				uint8_t led_count = adc_result * 5 / 1023;
+				Set_Clear_Ports(0);
+				for (uint8_t i = 5; i < (5 + led_count); i++) {
+					LED_Array[i].LED_PORT->OUTSET = LED_Array[i].bit_mapping;
+			}
+			
+			}
+	}
+}
+
+ISR(TCA0_OVF_vect) {
+	TCA0.SINGLE.INTFLAGS = 0b00000001;
+	if (rtc_flag = 0 ){
+		if (PORTE.IN & PIN1_bm) {
+		Set_Clear_Ports(0);
+		LED_Array[cylon_index].LED_PORT->OUTSET = LED_Array[cylon_index].bit_mapping;
+		if (direction)
+		cylon_index++;
+		else
+		cylon_index--;
+		if (cylon_index == 9) direction = 0;
+		if (cylon_index == 0) direction = 1;
+	} else {
+		if (PORTE.IN & PIN1_bm) {
+			Set_Clear_Ports(0);
+			LED_Array[cylon_index].LED_PORT->OUTSET = LED_Array[cylon_index].bit_mapping;
+			if (direction)
+			cylon_index++;
+			else
+			cylon_index--;
+			if (cylon_index == 4) direction = 0;
+			if (cylon_index == 0) direction = 1;
+	}
+	}
+	
+}
+
+ISR(ADC0_RESRDY_vect) {
+	adc_result = ADC0.RES;
+	TCA0.SINGLE.PER = (adc_result > ADC_THRESHOLD) ? HALF_SEC_COUNT : HALF_SEC_COUNT / 4;
+}
