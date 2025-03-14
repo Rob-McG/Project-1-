@@ -1,0 +1,72 @@
+#include <avr/io.h>
+#include <avr/interrupt.h>
+
+#define ADC_THRESHOLD 716  // (3.5V / 5V) * 1024 for 10-bit ADC
+
+volatile uint16_t adc_result = 0;
+volatile uint8_t display_mode = 0;
+volatile uint8_t rtc_flag = 0;
+
+void init_ports() {
+    PORTC.DIRSET = 0xFF;  // Set LED array pins as outputs
+    PORTE.DIRCLR = (1 << 1);  // Set PORTE1 as input
+    PORTE.PIN1CTRL = PORT_PULLUPEN_bm;  // Enable pull-up resistor on PORTE1
+}
+
+void init_timer() {
+    TCA0.SINGLE.CTRLA = TCA_SINGLE_CLKSEL_DIV1024_gc | TCA_SINGLE_ENABLE_bm;
+    TCA0.SINGLE.PER = 1953; // 0.125s period for 16MHz clock with div1024
+    TCA0.SINGLE.INTCTRL = TCA_SINGLE_OVF_bm;
+}
+
+void init_adc() {
+    ADC0.CTRLA = ADC_ENABLE_bm | ADC_FREERUN_bm;
+    ADC0.CTRLB = ADC_RESSEL_10BIT_gc;
+    ADC0.CTRLC = ADC_PRESC_DIV64_gc | ADC_REFSEL_VDDREF_gc;
+    ADC0.MUXPOS = ADC_MUXPOS_AIN3_gc;
+    ADC0.COMMAND = ADC_STCONV_bm;
+    ADC0.INTCTRL = ADC_RESRDY_bm;
+}
+
+void init_rtc() {
+    RTC.CLKSEL = RTC_CLKSEL_INT1K_gc;
+    RTC.PITCTRLA = RTC_PERIOD_CYC32768_gc | RTC_PITEN_bm;  // 16 sec period
+    RTC.PITINTCTRL = RTC_PI_bm;
+}
+
+ISR(TCA0_OVF_vect) {
+    TCA0.SINGLE.INTFLAGS = TCA_SINGLE_OVF_bm;  // Clear interrupt flag
+    if (rtc_flag) {
+        PORTC.OUT = (adc_result < ADC_THRESHOLD) ? 0x1F : 0x3F;  // Shared display mode
+    } else {
+        if (PORTE.IN & (1 << 1)) {
+            PORTC.OUT ^= 0xFF;  // Cylon pattern
+        }
+    }
+}
+
+ISR(ADC0_RESRDY_vect) {
+    adc_result = ADC0.RES;
+    ADC0.INTFLAGS = ADC_RESRDY_bm;
+}
+
+ISR(RTC_PIT_vect) {
+    RTC.PITINTFLAGS = RTC_PI_bm;  // Clear interrupt flag
+    rtc_flag ^= 1;  // Toggle shared display mode
+}
+
+int main() {
+    init_ports();
+    init_timer();
+    init_adc();
+    init_rtc();
+    sei();  // Enable global interrupts
+
+    while (1) {
+        if (adc_result < ADC_THRESHOLD) {
+            if (!(PORTE.IN & (1 << 1))) {
+                PORTC.OUT = 0x3F;  // ADC thermometer display
+            }
+        }
+    }
+}
