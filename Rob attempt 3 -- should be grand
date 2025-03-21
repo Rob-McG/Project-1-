@@ -1,0 +1,195 @@
+/* 
+ * Created: 17/03/25
+ * Author : Robert McGarvey
+ * this is advanced
+ */ 
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <avr/cpufunc.h>
+
+#define HALF_SEC_COUNT 9766
+#define ADC_THRESHOLD 716  // About 3.5V for 10-bit ADC (3.5V/5V * 1023)
+
+volatile uint16_t adc_result = 0;
+volatile uint8_t cylon_index = 0;
+volatile uint8_t direction = 1;
+volatile uint8_t split_mode = 0;
+
+void CLOCK_init(void);
+void TCA0_init_bits(void);
+void ADC0_init(void);
+void RTC_init(void);
+void InitialiseLED_PORT_bits(void);
+void InitialiseButton_PORT_bits(void);
+void handleSplitMode(void);
+void handleFullMode(void);
+
+struct LED_BITS
+{
+	PORT_t *LED_PORT;
+	uint8_t bit_mapping;
+};
+
+struct LED_BITS LED_Array[10] = {
+	{&PORTC, PIN5_bm}, {&PORTC, PIN4_bm}, {&PORTA, PIN0_bm}, {&PORTF, PIN5_bm}, {&PORTC, PIN6_bm}, {&PORTB, PIN2_bm}, {&PORTF, PIN4_bm}, {&PORTA, PIN1_bm}, {&PORTA, PIN2_bm}, {&PORTA, PIN3_bm}
+};
+
+void CLOCK_init(void) {
+	/* Disable CLK_PER Prescaler */
+	ccp_write_io( (void *) &CLKCTRL.MCLKCTRLB , (0 << CLKCTRL_PEN_bp));
+	/* If set from the fuses during device programming, the CPU will now run at 20MHz (default is /6) */
+}
+
+void TCA0_init_bits(void) {
+/* This function initializes Timer/Counter TCA0 to interrupt at a period set by the clock division ratio 
+	and the PER register setting
+*/
+
+	TCA0.SINGLE.INTCTRL = 0b00000001;		/* Counter overflow interrupt option */
+	TCA0.SINGLE.CTRLB = 0b00000000;			/* Normal Mode selected - TOP value in PER register */
+	TCA0.SINGLE.EVCTRL = 0b00000000;		/* TCA0 can count events from the EVENT module - disable this option */
+	
+	/* Now set the PER register to 9766, our top value */
+	/* This is because 20MHz/1024  gives TCA0clk period = 51.2us and 51.2us*9766 = 0.5000192s */
+	
+	TCA0.SINGLE.PER = HALF_SEC_COUNT;		/* The TCA0 counter will overflow when it reaches the PER value */
+	TCA0.SINGLE.CTRLA = 0b00001111;			/* Prescale set to /1024 and enable TCA0 (start count) */
+
+}
+
+void ADC0_init(void) {
+	ADC0.CTRLC = 0b01010011; // Sampcap, VDD,Div by 16
+	ADC0.CTRLA = 0b00000011; // 10 bit res, freerun, Enabled
+	ADC0.MUXPOS = ADC_MUXPOS_AIN3_gc; // input pin
+	ADC0.INTCTRL = ADC_RESRDY_bm; // result ready interrupt
+	ADC0.COMMAND = ADC_STCONV_bm;
+}
+
+void RTC_init(void) {
+	RTC.CLKSEL = RTC_CLKSEL_INT1K_gc; // set to 1.024 khz oscillator
+	RTC.PITCTRLA = 0b01101001; // 32768 cycles to interrupt for 16 seconds for split mode
+	RTC.PITINTCTRL = RTC_PI_bm; // interrupt enabled
+}
+
+void InitialiseLED_PORT_bits(void) {
+	PORTC.DIR = PIN6_bm | PIN5_bm | PIN4_bm;  /*(1<<6) | (1<<5) | (1<<4); 0x70;*/		/* PC4-UNO D1 (TXD1), PC5-UNO D0 (RXD1), PC6 - UNO D4  */
+	PORTA.DIR = PIN3_bm | PIN2_bm | PIN1_bm | PIN0_bm; /*(1<<1) | (1<<0);   0x0f; */      /* PA1-UNO D7, PA0 - UNO D2, PA2- LED8, PA3 - LED9  */
+	PORTB.DIR = PIN2_bm; /*0x04;*/		/* PB2 - UNO D5 */
+	PORTF.DIR = PIN5_bm | PIN4_bm; /*(1<<5) | (1<<4);   0x30; */		/* PF5 - UNO D3, PF4 UNO D6 */
+	/* Later use PIN6_bm etc */
+}
+
+void InitialiseButton_PORT_bits(void) {
+	PORTE.DIRCLR = PIN1_bm;		/* PORTE bit 1 is an input */
+	PORTE.PIN1CTRL |= PORT_PULLUPEN_bm;		/* Enable Pull up resistors on PORTE pins 1 & 2 */
+}
+
+void handleSplitMode() {
+	
+	// Changes cylon direction if cylon++ is at limit
+	if (cylon_index >= 4) direction = 0; // Upper limit is the 9th led
+	if (cylon_index <= 0) direction = 1; // Lower limit is the 0th led
+	
+	uint8_t k;
+	for (k=0; k < 10; k++){
+		if (k == cylon_index){
+			LED_Array[k].LED_PORT->OUTSET = LED_Array[k].bit_mapping; // Turns leds on if i == cylon indez
+		} else {
+			LED_Array[k].LED_PORT->OUTCLR = LED_Array[k].bit_mapping; // Turns leds off if i != cylon indez
+		}
+		}
+
+	uint8_t led_count = adc_result / 255; // div adc result by 5
+	uint8_t i;
+	for (i = 5; i < 10; i++) { // from 5th led to the 9th led
+		if (i <= 5+led_count) {
+			LED_Array[i].LED_PORT->OUTSET = LED_Array[i].bit_mapping; // Turn on LEDs up to led_count
+		} else {
+			LED_Array[i].LED_PORT->OUTCLR = LED_Array[i].bit_mapping; // Turn off LEDs above led_count
+		}
+	}
+}
+
+void handleFullmode() {
+	
+	// Changes cylon direction if cylon++ is at limit
+	if (cylon_index >= 9) direction = 0; // Upper limit is the 9th led
+	if (cylon_index <= 0) direction = 1; // Lower limit is the 0th led
+
+	// if button is not pressed do cylon
+	if ((PORTE.IN & PIN1_bm)) {
+		uint8_t i;
+		for (i=0; i < 10; i++){
+			if (i == cylon_index){
+				LED_Array[i].LED_PORT->OUTSET = LED_Array[i].bit_mapping; // Turns leds on if i == cylon indez
+			} else {
+				LED_Array[i].LED_PORT->OUTCLR = LED_Array[i].bit_mapping; // Turns leds off if i != cylon indez
+			}
+		}
+		} else { // if button is pressed go into thermometer mode
+			
+			uint16_t led_count = 1 + adc_result/113; // div adc result by 10
+			uint8_t i;
+			for (i = 0; i < 10; i++) {
+				if (i < led_count) {
+					LED_Array[i].LED_PORT->OUTSET = LED_Array[i].bit_mapping; // Turn on LEDs up to led_count
+				} else {
+					LED_Array[i].LED_PORT->OUTCLR = LED_Array[i].bit_mapping; // Turn off LEDs above led_count
+				}
+			}
+			
+			
+		}
+}
+
+int main(void) {
+	CLOCK_init();
+	InitialiseLED_PORT_bits();
+	InitialiseButton_PORT_bits();
+	TCA0_init_bits();
+	ADC0_init();
+	RTC_init();
+	sei();
+
+	while (1) {
+		if (split_mode && (PORTE.IN & PIN1_bm)) { // if still in split mode and not pressing, Get out of split mode
+			split_mode = 0; // Exit split mode
+			cylon_index = 0; // Reset cylon index
+			direction = 1;   // Reset cylon direction
+		}
+		
+		// changes to either split mode or full mode
+		if (split_mode) {
+			handleSplitMode();
+			} else {
+			handleFullmode();
+		}
+		
+	}
+}
+
+
+/*
+ISR to count cylon up / down depending on direction
+*/
+ISR(TCA0_OVF_vect) {
+	TCA0.SINGLE.INTFLAGS = 0b00000001;
+	direction ? cylon_index++ : cylon_index--;
+}
+
+ISR(ADC0_RESRDY_vect) {
+	ADC0.INTFLAGS = ADC_RESRDY_bm;
+	adc_result = ADC0.RES;
+	// Set the period based on ADC result (affects the speed of the Cylon effect)
+	TCA0.SINGLE.PERBUF = (adc_result > ADC_THRESHOLD) ? HALF_SEC_COUNT : HALF_SEC_COUNT / 4;
+	/* Line above sets cylon speed. 1st variable = slow speed, 2nd = fast speed*/
+}
+
+ISR(RTC_PIT_vect) {
+	RTC.PITINTFLAGS = RTC_PI_bm;
+	// If button is pressed at 16s mark, activate split mode
+	if (!(PORTE.IN & PIN1_bm)) {
+		split_mode ^= 1;
+	}
+}
