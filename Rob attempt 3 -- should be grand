@@ -88,8 +88,8 @@ void InitialiseButton_PORT_bits(void) {
 void handleSplitMode() {
 	
 	// Changes cylon direction if cylon++ is at limit
-	if (cylon_index >= 4) direction = 0; // Upper limit is the 9th led
-	if (cylon_index <= 0) direction = 1; // Lower limit is the 0th led
+	//if (cylon_index >= 4) direction = 0; // Upper limit is the 9th led
+	//if (cylon_index <= 0) direction = 1; // Lower limit is the 0th led
 	
 	uint8_t k;
 	for (k=0; k < 10; k++){
@@ -114,8 +114,8 @@ void handleSplitMode() {
 void handleFullmode() {
 	
 	// Changes cylon direction if cylon++ is at limit
-	if (cylon_index >= 9) direction = 0; // Upper limit is the 9th led
-	if (cylon_index <= 0) direction = 1; // Lower limit is the 0th led
+	//if (cylon_index >= 9) direction = 0; // Upper limit is the 9th led
+	//if (cylon_index <= 0) direction = 1; // Lower limit is the 0th led
 
 	// if button is not pressed do cylon
 	if ((PORTE.IN & PIN1_bm)) {
@@ -151,6 +151,19 @@ int main(void) {
 	sei();
 
 	while (1) {
+		
+			//static
+			uint16_t old_adc= 0xFFFF; // Initialize to an impossible value to ensure the first update happens
+			uint16_t new_adc = ADC0.RES;
+			
+			if (new_adc != old_adc) { // Only update if ADC value has changed
+				adc_result = new_adc;
+				old_adc = new_adc;
+
+				// Set the period based on ADC result (affects the speed of the Cylon effect)
+				TCA0.SINGLE.PERBUF = (adc_result > ADC_THRESHOLD) ? HALF_SEC_COUNT : HALF_SEC_COUNT / 4;
+			}
+		
 		if (split_mode && (PORTE.IN & PIN1_bm)) { // if still in split mode and not pressing, Get out of split mode
 			split_mode = 0; // Exit split mode
 			cylon_index = 0; // Reset cylon index
@@ -173,24 +186,22 @@ ISR to count cylon up / down depending on direction
 */
 ISR(TCA0_OVF_vect) {
 	TCA0.SINGLE.INTFLAGS = 0b00000001;
-
+	uint16_t cylon_upper;
+	
+	if (split_mode) {
+		cylon_upper = 4;
+	} else {
+		cylon_upper = 9;
+	}
+	// Changes cylon direction if cylon++ is at limit
+	if (cylon_index >= cylon_upper) direction = 0; // Upper limit is the 9th led
+	if (cylon_index <= 0) direction = 1; // Lower limit is the 0th led
+	
 	direction ? cylon_index++ : cylon_index--;
 }
 
 ISR(ADC0_RESRDY_vect) {
 	ADC0.INTFLAGS = ADC_RESRDY_bm;
-	//static 
-	uint16_t old_adc; //= 0xFFFF; // Initialize to an impossible value to ensure the first update happens
-
-	uint16_t new_adc = ADC0.RES;
-	
-	if (new_adc != old_adc) { // Only update if ADC value has changed
-		adc_result = new_adc;
-		old_adc = new_adc;
-
-		// Set the period based on ADC result (affects the speed of the Cylon effect)
-		TCA0.SINGLE.PERBUF = (adc_result > ADC_THRESHOLD) ? HALF_SEC_COUNT : HALF_SEC_COUNT / 4;
-	}
 }
 
 ISR(RTC_PIT_vect) {
