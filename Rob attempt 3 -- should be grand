@@ -1,6 +1,6 @@
 /* 
  * Created: 17/03/25
- * Author : Robert McGarvey
+ * Author : Robert McGarvey, Ciaran Byrnes, Edgar Katelovic
  * this is advanced
  */ 
 
@@ -138,8 +138,6 @@ void handleFullmode() {
 					LED_Array[i].LED_PORT->OUTCLR = LED_Array[i].bit_mapping; // Turn off LEDs above led_count
 				}
 			}
-			
-			
 		}
 }
 
@@ -175,15 +173,24 @@ ISR to count cylon up / down depending on direction
 */
 ISR(TCA0_OVF_vect) {
 	TCA0.SINGLE.INTFLAGS = 0b00000001;
+
 	direction ? cylon_index++ : cylon_index--;
 }
 
 ISR(ADC0_RESRDY_vect) {
 	ADC0.INTFLAGS = ADC_RESRDY_bm;
-	adc_result = ADC0.RES;
-	// Set the period based on ADC result (affects the speed of the Cylon effect)
-	TCA0.SINGLE.PERBUF = (adc_result > ADC_THRESHOLD) ? HALF_SEC_COUNT : HALF_SEC_COUNT / 4;
-	/* Line above sets cylon speed. 1st variable = slow speed, 2nd = fast speed*/
+	//static 
+	uint16_t old_adc; //= 0xFFFF; // Initialize to an impossible value to ensure the first update happens
+
+	uint16_t new_adc = ADC0.RES;
+	
+	if (new_adc != old_adc) { // Only update if ADC value has changed
+		adc_result = new_adc;
+		old_adc = new_adc;
+
+		// Set the period based on ADC result (affects the speed of the Cylon effect)
+		TCA0.SINGLE.PERBUF = (adc_result > ADC_THRESHOLD) ? HALF_SEC_COUNT : HALF_SEC_COUNT / 4;
+	}
 }
 
 ISR(RTC_PIT_vect) {
