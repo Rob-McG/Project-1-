@@ -1,0 +1,595 @@
+/*
+ * Project2_us.c
+ *
+ * Created: 11/03/2025 17:37:30
+ * Author : Ciaran.MacNamee
+ */ 
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <avr/cpufunc.h>
+
+#define F_CPU 20000000
+#define USART3_BAUD_RATE(BAUD_RATE) ((float)(F_CPU * 64 / (16 * (float)BAUD_RATE)) + 0.5)
+#define TARGET_BAUD_RATE 115200
+
+#define TCB_INTERVAL 1000000
+#define TCB_TOP 50000
+#define TCB_COUNT (TCB_INTERVAL/TCB_TOP)
+
+#include <util/delay.h>
+#include <stdio.h>
+
+/* Use a struct to make the association between PORTs and bits connected to the LED array more explicit */
+struct LED_BITS {
+    PORT_t *LED_PORT;
+    uint8_t bit_mapping;
+};
+
+struct LED_BITS LED_Array[10] = {
+	{&PORTC, PIN5_bm}, {&PORTC, PIN4_bm}, {&PORTA, PIN0_bm}, {&PORTF, PIN5_bm}, {&PORTC, PIN6_bm}, {&PORTB, PIN2_bm}, {&PORTF, PIN4_bm}, {&PORTA, PIN1_bm}, {&PORTA, PIN2_bm}, {&PORTA, PIN3_bm}
+};
+
+uint8_t qcntr = 0, sndcntr = 0;
+unsigned char queue[50];
+
+uint8_t newDistanceData, newTimeData, newADC0Data;
+uint16_t adc_reading;        /* ADC0 RES has 10-bits, read it into a 16-bit variable */
+uint8_t ServoFollowADC;      /* Servo position based on ADC0 RES value */
+
+// Additional global variables
+#define SERVO_MIN 500    // 1ms pulse (0 degrees)
+#define SERVO_MAX 3200     // 2ms pulse (180 degrees)
+#define SERVO_STEP 63      // Same as example script
+volatile uint16_t servoPosition = 1250;  // Initial position (1.5ms)
+volatile uint8_t servoStep = 0;
+volatile uint8_t servoDirection = 1;     // 1 for increasing, 0 for decreasing
+volatile uint16_t servoDelayCount = 0;
+volatile uint16_t servoDelayTarget = 0; // Default speed (1.0s per step)
+volatile uint8_t triggerCount = 0;
+
+volatile uint16_t pulseWidth = 0;        // For HC-SR04
+volatile uint8_t pulse_captured = 0;
+volatile uint16_t timerPeriod = 0;       // For 555 timer
+volatile uint16_t highPulseWidth = 0;    // For 555 timer
+
+void CLOCK_init(void);
+void InitialiseLED_PORT_bits(void);
+void Initialise_TCA0_SS_PWM(void);
+void Initialise_EVSYS(void);
+void Initialise_TCB0_ICP_PW(void);
+void Initialise_TCB2_ICP_PWFRQ(void);
+void Set_Clear_Ports(uint8_t set);
+void USART3_init(void);
+void ADC0_init(void);
+void sendmsg(char* s); 
+void TCB3_init(void);
+void triggerUltrasonic(void);
+
+void CLOCK_init(void) {
+    /* Disable CLK_PER Prescaler */
+    ccp_write_io((void *) &CLKCTRL.MCLKCTRLB, (0 << CLKCTRL_PEN_bp));
+    /* If set from the fuses during device programming, the CPU will now run at 20MHz (default is /6) */
+}
+
+ void InitialiseLED_PORT_bits()
+ {
+	 PORTC.DIRSET = PIN6_bm | PIN5_bm | PIN4_bm;  /*(1<<6) | (1<<5) | (1<<4); 0x70;*/		/* PC4-UNO D1 (TXD1), PC5-UNO D0 (RXD1), PC6 - UNO D4  */
+	 PORTA.DIRSET = PIN3_bm | PIN2_bm | PIN1_bm | PIN0_bm; /*(1<<1) | (1<<0);   0x0f; */      /* PA1-UNO D7, PA0 - UNO D2, PA2- LED8, PA3 - LED9  */
+	 PORTB.DIRSET = PIN2_bm; /*0x04;*/		/* PB2 - UNO D5 */
+	 PORTF.DIRSET = PIN5_bm | PIN4_bm; /*(1<<5) | (1<<4);   0x30; */		/* PF5 - UNO D3, PF4 UNO D6 */
+	 PORTB.DIRCLR = PIN0_bm;  // PB0 as input (Echo)
+	 PORTB.PIN0CTRL = PORT_ISC_RISING_gc; // Configure interrupt on rising edge
+	 PORTB.PIN0CTRL = PORT_ISC_INPUT_DISABLE_gc | PORT_PULLUPEN_bm; // Enable pull-up on Echo pin
+	 /* Later use PIN6_bm etc */
+ }
+
+void USART3_init(void) {
+    PORTB.DIRCLR = PIN5_bm;
+    PORTB.DIRSET = PIN4_bm;
+    USART3.BAUD = (uint16_t)USART3_BAUD_RATE(TARGET_BAUD_RATE);
+    USART3.CTRLB = (USART_TXEN_bm | USART_RXEN_bm);
+    PORTMUX.USARTROUTEA |= PORTMUX_USART3_ALT1_gc;
+    USART3.CTRLA = USART_TXCIE_bm;
+}
+
+void Initialise_TCA0_SS_PWM() {
+	PORTA.DIRSET = PIN0_bm;       // PA0 as output
+	
+	// Direct register writes:
+	TCA0.SINGLE.CTRLB = (TCA_SINGLE_CMP0EN_bm | TCA_SINGLE_WGMODE_SINGLESLOPE_gc);  // CMP0EN=1, WGMODE=001
+	TCA0.SINGLE.PER = 24999;  // 24999
+	TCA0.SINGLE.CMP0 = 1250; // 1875
+	TCA0.SINGLE.CTRLA = (TCA_SINGLE_CLKSEL_DIV16_gc | TCA_SINGLE_ENABLE_bm);  // CLK_PER/16, Enabled
+}
+
+void Initialise_EVSYS() {
+    // Configure PB0 (Echo) as event generator for TCB0
+    EVSYS.CHANNEL0 = EVSYS_GENERATOR_PORT0_PIN0_gc;  // PORTB PIN0
+    EVSYS.USERTCB0 = EVSYS_CHANNEL_CHANNEL0_gc;
+	
+    // Set Port B Pin 0 as input event (Channel 0)
+    PORTB.PIN0CTRL = PORT_ISC_INPUT_DISABLE_gc; // Disable digital input buffer
+    EVSYS.USERCCLLUT0A = EVSYS_CHANNEL_CHANNEL0_gc; // TCB0 uses Channel 0
+    
+    // Set Port E Pin 3 (PE3) as input event (Channel 4)
+    PORTE.PIN3CTRL = PORT_ISC_INPUT_DISABLE_gc; // Disable digital input buffer
+    EVSYS.USERCCLLUT2A = EVSYS_CHANNEL_CHANNEL4_gc; // TCB2 uses Channel 4
+    
+    // Set TCB3 as Generator for Channel 5
+    EVSYS.USERTCB3 = EVSYS_CHANNEL_CHANNEL5_gc;
+    EVSYS.CHANNEL5 = EVSYS_GENERATOR_TCB3_CAPT_gc;
+    
+    // ADC0 uses Channel 5
+    EVSYS.USERADC0 = EVSYS_CHANNEL_CHANNEL5_gc;
+}
+
+void Initialise_TCB0_ICP_PW() {
+	TCB0.CTRLA = 0; // Reset timer
+	
+	// Configure for 10MHz clock (20MHz/2)
+	TCB0.CTRLA = TCB_CLKSEL_CLKDIV2_gc;
+	
+	// Pulse Width measurement mode with noise cancellation
+	TCB0.CTRLB = TCB_CNTMODE_PW_gc;
+	TCB0.EVCTRL = TCB_CAPTEI_bm | TCB_EDGE_bm | TCB_FILTER_bm;
+	
+	// Enable interrupt and timer
+	TCB0.INTCTRL = TCB_CAPT_bm;
+	TCB0.CTRLA |= TCB_ENABLE_bm;
+	
+	// Reset counter
+	TCB0.CNT = 0;
+}
+
+void Initialise_TCB2_ICP_PWFRQ() {
+    // Enable TCB2 with CLK_PER divider 2 (10MHz)
+    TCB2.CTRLA = TCB_CLKSEL_CLKDIV2_gc | TCB_ENABLE_bm;
+    
+    // Configure in Input Capture Frequency Measurement mode
+    TCB2.CTRLB = TCB_CNTMODE_FRQ_gc;
+    
+    // Enable Capture interrupt
+    TCB2.INTCTRL = TCB_CAPT_bm;
+    
+    // Enable Event Input and Rising Edge
+    TCB2.EVCTRL = TCB_CAPTEI_bm | TCB_EDGE_bm;
+}
+
+void TCB3_init(void) {
+    // Enable overflow interrupt
+    TCB3.INTCTRL = TCB_CAPT_bm;
+    
+    // CLK_PER divided by 2 (10MHz) and enable TCB3
+    TCB3.CTRLA = TCB_CLKSEL_CLKDIV2_gc | TCB_ENABLE_bm;
+    
+    // Periodic Interrupt Mode
+    TCB3.CTRLB = TCB_CNTMODE_INT_gc;
+    
+    // Set for 5ms interrupt rate (10MHz / 50000 = 200Hz = 5ms)
+    TCB3.CCMP = 50000;
+}
+
+void ADC0_init(void) {
+    // 10-bit resolution, Free Running Mode NOT selected
+    ADC0.CTRLA = ADC_RESSEL_10BIT_gc;
+    
+    // Simple No Accumulation operation
+    ADC0.CTRLB = ADC_SAMPNUM_ACC1_gc;
+    
+    // SAMPCAP=1, VDD reference, DIV128 prescaler
+    ADC0.CTRLC = ADC_SAMPCAP_bm | ADC_REFSEL_VDDREF_gc | ADC_PRESC_DIV128_gc;
+    
+    // INITDLY set to 16 CLK_ADC cycles
+    ADC0.CTRLD = ADC_INITDLY_DLY16_gc;
+    
+    // Select AIN3 (PORTD3)
+    ADC0.MUXPOS = ADC_MUXPOS_AIN3_gc;
+    
+    // STARTEI set to 1 (event triggered)
+    ADC0.EVCTRL = ADC_STARTEI_bm;
+    
+    // Enable RESRDY interrupt
+    ADC0.INTCTRL = ADC_RESRDY_bm;
+    
+    // Enable ADC0
+    ADC0.CTRLA |= ADC_ENABLE_bm;
+	
+	// Start first conversion
+	ADC0.COMMAND = ADC_STCONV_bm;
+}
+
+void triggerUltrasonic(void) {
+	// Disable interrupts for clean trigger
+	uint8_t oldSREG = SREG;
+	cli();
+	
+	PORTC.OUTCLR = PIN6_bm;  // Ensure low
+	_delay_us(4);
+	PORTC.OUTSET = PIN6_bm;  // Trigger high
+	_delay_us(15);           // Extended 15µs pulse
+	PORTC.OUTCLR = PIN6_bm; // Trigger low
+	
+	// Reset timer
+	TCB0.CNT = 0;
+	TCB0.INTFLAGS = TCB_CAPT_bm;
+	
+	// Re-enable interrupts
+	SREG = oldSREG;
+}
+
+int main(void) {
+    char ch;
+    char str_buffer[60];
+    
+    uint8_t continuousDistance = 0;
+    uint8_t continuousTime = 0;
+    uint8_t continuousVolts = 0;
+	uint8_t continuousServoPos = 0;
+    
+    ServoFollowADC = 0;     
+    
+    newDistanceData = 0;
+    newTimeData = 0;
+    newADC0Data = 0;
+    
+    CLOCK_init();
+    
+    /* set UNO D0-D7 to all outputs, also LED8 and LED9  */
+    InitialiseLED_PORT_bits();
+    
+    Set_Clear_Ports(0);        /* Initialise LEDS to all OFF */
+    
+    Initialise_TCA0_SS_PWM();
+    Initialise_EVSYS();
+    Initialise_TCB0_ICP_PW();
+    USART3_init();
+    Initialise_TCB2_ICP_PWFRQ();
+    TCB3_init();
+    ADC0_init();
+    
+    sei(); /* Enable Global Interrupts */
+    while (1) {
+        if (USART3.STATUS & USART_RXCIF_bm) {
+            ch = USART3.RXDATAL;
+            
+            switch (ch) {
+                case 'a': 
+                case 'A':
+                    sprintf(str_buffer, "ADC0 RES = %d\n", adc_reading);
+                    sendmsg(str_buffer);
+                    break;
+                case 'v': 
+                case 'V': {
+                    uint16_t voltage_mV = (uint32_t)adc_reading * 3300 / 1024;
+                    sprintf(str_buffer, "Voltage = %d mV\n", voltage_mV);
+                    sendmsg(str_buffer);
+                    break;
+                }
+                case 't': 
+                case 'T': {
+                    float period_us = (float)timerPeriod / 10.0; // 10MHz clock = 0.1us per tick
+                    sprintf(str_buffer, "Timer period = %.1f us\n", period_us);
+                    sendmsg(str_buffer);
+                    break;
+                }
+                case 'H': 
+                case 'h': {
+                    float high_us = (float)highPulseWidth / 10.0; // 10MHz clock = 0.1us per tick
+                    sprintf(str_buffer, "High pulse = %.1f us\n", high_us);
+                    sendmsg(str_buffer);
+                    break;
+                }
+                case 'L': 
+                case 'l': {
+                    float low_us = ((float)timerPeriod - (float)highPulseWidth) / 10.0;
+                    sprintf(str_buffer, "Low pulse = %.1f us\n", low_us);
+                    sendmsg(str_buffer);
+                    break;
+                }
+                case 'd': 
+                case 'D': {
+	                if(pulseWidth > 0) {
+		                // Convert timer ticks to mm: (ticks × 0.1µs × 343m/s × 1000) / 2
+		                uint32_t distance_mm = (pulseWidth * 343UL) / 20;
+		                
+		                // Apply sanity checks (20mm-4000mm)
+		                if(distance_mm >= 20 && distance_mm <= 4000) {
+			                sprintf(str_buffer, "Distance = %u mm\n", distance_mm);
+		                }
+		                else {
+			                sprintf(str_buffer, "Out of range\n");
+		                }
+	                }
+	                else {
+		                sprintf(str_buffer, "No echo\n");
+	                }
+	                sendmsg(str_buffer);
+	                break;
+                }
+                case 's': 
+                case 'S':
+                    continuousDistance = 1;
+                    sprintf(str_buffer, "Continuous Distance ON\n");
+                    sendmsg(str_buffer);
+                    break;
+                case 'u': 
+                case 'U':
+                    continuousDistance = 0;
+                    sprintf(str_buffer, "Continuous Distance OFF\n");
+                    sendmsg(str_buffer);
+                    break;
+                case 'c': 
+                case 'C':
+                    continuousTime = 1;
+                    sprintf(str_buffer, "Continuous Time ON\n");
+                    sendmsg(str_buffer);
+                    break;
+                case 'e': 
+                case 'E':
+                    continuousTime = 0;
+                    sprintf(str_buffer, "Continuous Time OFF\n");
+                    sendmsg(str_buffer);
+                    break;
+                case 'm': 
+                case 'M':
+                    continuousVolts = 1;
+                    sprintf(str_buffer, "Continuous Volts ON\n");
+                    sendmsg(str_buffer);
+                    break;
+                case 'n': 
+                case 'N':
+                    continuousVolts = 0;
+                    sprintf(str_buffer, "Continuous Volts OFF\n");
+                    sendmsg(str_buffer);
+                    break;
+                case 'f':
+                case 'F':
+                    ServoFollowADC = 1;
+                    sprintf(str_buffer, "Servo following ADC\n");
+                    sendmsg(str_buffer);
+                    break;
+                case 'g':
+                case 'G':
+                    ServoFollowADC = 0;
+                    sprintf(str_buffer, "Servo in step mode\n");
+                    sendmsg(str_buffer);
+                    break;
+                case '0':
+					sprintf(str_buffer, "Stop Movement\n");
+					sendmsg(str_buffer);
+                    servoDelayTarget = 0; // Stop movement
+                    break;
+                case '1':
+					sprintf(str_buffer, "1.0s per step\n");
+					sendmsg(str_buffer);
+                    servoDelayTarget = 20; // 1.0s per step (5ms * 20 = 100ms)
+                    break;
+                case '2':
+					sprintf(str_buffer, "0.75s per step\n");
+					sendmsg(str_buffer);
+                    servoDelayTarget = 15; // 0.75s per step
+                    break;
+                case '3':
+					sprintf(str_buffer, "0.5s per step\n");
+					sendmsg(str_buffer);
+                    servoDelayTarget = 10; // 0.5s per step
+                    break;
+                case '4':
+					sprintf(str_buffer, "0.4s per step\n");
+					sendmsg(str_buffer);
+                    servoDelayTarget = 8; // 0.4s per step
+                    break;
+                case '5':
+					sprintf(str_buffer, "0.25s per step\n");
+					sendmsg(str_buffer);
+                    servoDelayTarget = 5; // 0.25s per step
+                    break;
+                case '6':
+					sprintf(str_buffer, "0.2s per step\n");
+					sendmsg(str_buffer);
+                    servoDelayTarget = 4; // 0.2s per step
+                    break;
+                case '7':
+					sprintf(str_buffer, "0.15s per step\n");
+					sendmsg(str_buffer);
+                    servoDelayTarget = 3; // 0.15s per step
+                    break;
+                case '8':
+					sprintf(str_buffer, "0.1s per step\n");
+					sendmsg(str_buffer);
+                    servoDelayTarget = 2; // 0.1s per step
+                    break;
+                case '9':
+					sprintf(str_buffer, "0.05s per step\n");
+					sendmsg(str_buffer);
+                    servoDelayTarget = 1; // 0.05s per step
+                    break;
+                case 'q':
+                case 'Q': // Left as a debug for adc to servo
+					continuousServoPos = 1;
+					sprintf(str_buffer, "Continuous Servo position ON\n");
+					sendmsg(str_buffer);
+					break;
+                case 'z':
+                case 'Z': // Left as a debug for adc to servo
+					continuousServoPos = 0;
+					sprintf(str_buffer, "\nContinuous Servo position OFF\n");
+					sendmsg(str_buffer);
+                break;									
+                default:
+                    sprintf(str_buffer, "Unrecognized input: %c\n", ch);
+                    sendmsg(str_buffer);
+                break;
+            }
+        }
+        if (continuousDistance && newDistanceData) {
+            if(pulseWidth > 0) {
+	            // Convert timer ticks to mm: (ticks × 0.1µs × 343m/s × 1000) / 2
+	            uint32_t distance_mm = (pulseWidth * 343UL) / 20;
+	            
+	            // Apply sanity checks (20mm-4000mm)
+	            if(distance_mm >= 20 && distance_mm <= 4000) {
+		            sprintf(str_buffer, "Distance = %u mm\n", distance_mm);
+	            }
+	            else {
+		            sprintf(str_buffer, "Out of range\n");
+	            }
+            }
+            else {
+	            sprintf(str_buffer, "No echo\n");
+            }
+            sendmsg(str_buffer);
+        }
+        else if (continuousTime && newTimeData) {
+            newTimeData = 0;
+            float period_us = (float)timerPeriod / 10.0;
+            sprintf(str_buffer, "Timer period = %.1f us\n", period_us);
+            sendmsg(str_buffer);
+        }
+        else if (continuousVolts && newADC0Data) {
+            newADC0Data = 0;
+            uint16_t voltage_mV = (uint32_t)adc_reading * 3300 / 1024;
+            sprintf(str_buffer, "Voltage = %d mV\n", voltage_mV);
+            sendmsg(str_buffer);
+        }
+		else if (continuousServoPos && (newADC0Data || (servoDelayTarget >= 0 && servoDelayCount == 0))) {
+			sprintf(str_buffer, "Servo position = %d\n", servoPosition);
+			sendmsg(str_buffer);
+		}
+    }
+}
+
+/* sendmsg function */
+void sendmsg(char* s) {
+    if (qcntr == sndcntr) {
+        qcntr = 0;
+        sndcntr = 1;
+        while (*s)
+            queue[qcntr++] = *s++;
+        USART3.TXDATAL = queue[0];
+    }
+}
+
+/* Function to set or clear all LED port bits, 1 - set, 0 - clear */
+void Set_Clear_Ports(uint8_t set) {
+    uint8_t i;
+    
+    for (i = 0; i <= 9; i += 1) {
+        if (set)
+            LED_Array[i].LED_PORT->OUTSET = LED_Array[i].bit_mapping;
+        else
+            LED_Array[i].LED_PORT->OUTCLR = LED_Array[i].bit_mapping;
+    }
+}
+
+/* ****************************************************************/ 
+/* Interrupt Service Routines */
+/* ****************************************************************/  
+ISR(TCB0_INT_vect) {
+	static uint16_t last_valid = 0;
+	uint16_t capture = TCB0.CCMP;
+	
+	// Validate pulse width (58µs-18ms in 0.1µs units)
+	if(capture >= 580 && capture <= 180000) {
+		pulseWidth = capture;
+		last_valid = capture;
+		newDistanceData = 1;
+	}
+	else if(last_valid > 0) {
+		// Use last valid reading if current is invalid
+		pulseWidth = last_valid;
+	}
+	else {
+		pulseWidth = 0;
+	}
+	
+	TCB0.INTFLAGS = TCB_CAPT_bm;
+	TCB0.CNT = 0; // Reset for next measurement
+	
+	if(pulseWidth == 0) {
+		// No echo - turn on error LED
+		PORTF.OUTSET = PIN4_bm;
+	}
+	else if(pulseWidth == last_valid) {
+		// Stable reading - turn on good LED
+		PORTB.OUTSET = PIN2_bm;
+	}
+}
+
+ISR(TCB2_INT_vect) {
+    TCB2.INTFLAGS = TCB_CAPT_bm; /* Clear the interrupt flag */
+    
+    // Capture the 555 timer period and high pulse width
+    timerPeriod = TCB2.CCMP;
+    highPulseWidth = TCB2.CNT;
+    newTimeData = 1;
+}
+
+ISR(TCB3_INT_vect) {
+	static uint8_t timeoutCount = 0;
+	TCB3.INTFLAGS = TCB_CAPT_bm;
+	
+	// Trigger every 100ms (20×5ms)
+	if(triggerCount++ >= 20) {
+		triggerCount = 0;
+		triggerUltrasonic();
+		timeoutCount = 0;
+	}
+	
+	// Timeout after 15ms (3×5ms)
+	if(timeoutCount++ > 3) {
+		pulseWidth = 0;
+		newDistanceData = 1;
+		timeoutCount = 0;
+	}
+    
+    // Servo control
+    if (!ServoFollowADC) {
+        if (servoDelayTarget > 0) {
+            servoDelayCount++;
+            if (servoDelayCount >= servoDelayTarget) {
+                servoDelayCount = 0;
+                
+                // Move servo to next position
+                if (servoDirection) {
+                    servoPosition += SERVO_STEP; // 50 ticks = 0.4ms / 25 steps = 7.2 degrees per step
+                    if (servoPosition >= SERVO_MAX) { // 2ms pulse width (90 degrees)
+                        servoDirection = 0;
+                    }
+                } else {
+                    servoPosition -= SERVO_STEP;
+                    if (servoPosition <= SERVO_MIN) { // 1ms pulse width (-90 degrees)
+                        servoDirection = 1;
+                    }
+                }
+                
+                TCA0.SINGLE.CMP0BUF = servoPosition;
+            }
+        }
+    }
+}
+
+ISR(ADC0_RESRDY_vect) {
+	adc_reading = ADC0.RES;
+	newADC0Data = 1;
+	
+	// Set LED[7] based on ADC reading
+	if (adc_reading > 512) {
+		PORTA.OUTSET = PIN1_bm; // LED 7 on
+		} else {
+		PORTA.OUTCLR = PIN1_bm; // LED 7 off
+	}
+	
+	// If in follow ADC mode, set servo position
+	if (ServoFollowADC) {
+		servoPosition = SERVO_MIN + ((uint32_t)adc_reading * (SERVO_MAX - SERVO_MIN)) / 1023;
+		TCA0.SINGLE.CMP0BUF = servoPosition;
+	} 
+}
+
+ISR(USART3_TXC_vect) {
+    USART3.STATUS |= USART_TXCIF_bm;
+    if (qcntr != sndcntr)
+        USART3.TXDATAL = queue[sndcntr++];
+}
