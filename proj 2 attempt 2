@@ -46,6 +46,7 @@ volatile uint16_t servoPosition = 1250;  // Initial position (1.5ms)
 volatile uint8_t servoDirection = 1;     // 1 for increasing, 0 for decreasing
 volatile uint16_t servoDelayCount = 0;		// counter to compare to servoDelayTarget
 volatile uint16_t servoDelayTarget = 0; // Initial Delay between steps, 0 for off, 1.0s per step
+volatile uint16_t clocksP, clocksT;
 
 volatile uint16_t pulseWidth = 0;        // For HC-SR04
 volatile uint16_t timerPeriod = 0;       // For 555 timer
@@ -77,12 +78,7 @@ void CLOCK_init(void) {
 	 PORTA.DIRSET = PIN3_bm | PIN2_bm | PIN1_bm | PIN0_bm; /*(1<<1) | (1<<0);   0x0f; */      /* PA1-UNO D7, PA0 - UNO D2, PA2- LED8, PA3 - LED9  */
 	 PORTB.DIRSET = PIN2_bm; /*0x04;*/		/* PB2 - UNO D5 */
 	 PORTF.DIRSET = PIN5_bm | PIN4_bm; /*(1<<5) | (1<<4);   0x30; */		/* PF5 - UNO D3, PF4 UNO D6 */
-	 PORTB.DIRCLR = PIN0_bm;  // PB0 as input (Echo)
-	 //PORTB.PIN0CTRL = PORT_ISC_RISING_gc; // Configure interrupt on rising edge
-	 //PORTB.PIN0CTRL = PORT_ISC_INPUT_DISABLE_gc | PORT_PULLUPEN_bm; // Enable pull-up on Echo pin
-	 /* Later use PIN6_bm etc */
-	 //PORTE.DIRCLR = PIN3_bm; // Make PE3 an input (555 output)
-	 //PORTE.PIN3CTRL = PORT_ISC_INPUT_DISABLE_gc; // Disable digital input so EVSYS can grab events
+	 //PORTB.DIRCLR = PIN0_bm;  // PB0 as input (Echo)
  }
 
 void USART3_init(void) {
@@ -94,7 +90,7 @@ void USART3_init(void) {
     USART3.CTRLA = USART_TXCIE_bm;
 }
 
-void Initialise_TCA0_SS_PWM() {
+void Initialise_TCA0_SS_PWM() { // servo
 	PORTA.DIRSET = PIN0_bm;       // PA0 as output
 	
 	// Direct register writes:
@@ -111,8 +107,8 @@ void Initialise_EVSYS(void) {
 	EVSYS.CHANNEL4 = EVSYS_GENERATOR_PORT0_PIN3_gc;   // Set Port 0 Pin 3 (PE3) as input event this is on Channel 4
 	EVSYS.USERTCB2 = EVSYS_CHANNEL_CHANNEL4_gc;  // Connect user to event channel 4, TCB2 is the Channel 4 user
 
-	EVSYS.CHANNEL5 = EVSYS_GENERATOR_TCB3_CAPT_gc;    // route TCB3.CAPT into EVSYS CH5
-	EVSYS.USERADC0 = EVSYS_CHANNEL_CHANNEL5_gc;  // feed CH5 into ADC0 start event
+	EVSYS.CHANNEL2 = EVSYS_GENERATOR_TCB3_CAPT_gc;    // route TCB3.CAPT into EVSYS CH5
+	EVSYS.USERADC0 = EVSYS_CHANNEL_CHANNEL2_gc;  // feed CH5 into ADC0 start event
 }
 
 void Initialise_TCB0_ICP_PW() { // distance sensor
@@ -124,15 +120,15 @@ void Initialise_TCB0_ICP_PW() { // distance sensor
 	TCB0.CTRLB = TCB_CNTMODE_PW_gc;
 
 	// Enable event input with digital filter (rising-to-falling for PW mode)
-	TCB0.EVCTRL = TCB_CAPTEI_bm | TCB_EDGE_bm;
+	TCB0.EVCTRL = TCB_CAPTEI_bm;;
 
 	// Enable capture interrupt
 	TCB0.INTCTRL = TCB_CAPT_bm;
 }
 
-void Initialise_TCB2_ICP_PWFRQ() {
+void Initialise_TCB2_ICP_PWFRQ() { // 555 yoke
 	/* Enable TCB0 and set CLK_PER divider to 2: Timer clock = 10MHz now */
-	TCB0.CTRLA = TCB_CLKSEL_CLKDIV2_gc | TCB_ENABLE_bm;  /* May do enable later */
+	TCB0.CTRLA = TCB_CLKSEL_CLKDIV2_gc | TCB_ENABLE_bm;
 	
 	/* Configure TCB0 in Input Capture Clock Frequency Measurement mode */
 	TCB0.CTRLB = TCB_CNTMODE_FRQPW_gc;
@@ -141,7 +137,7 @@ void Initialise_TCB2_ICP_PWFRQ() {
 	TCB0.INTCTRL = TCB_CAPT_bm;
 	
 	/* Enable Event Input and Event Edge*/
-	TCB0.EVCTRL = TCB_CAPTEI_bm;			/* Rising Edge selected because 555 Timer is asymmetric, low pulse shorter */
+	TCB0.EVCTRL = TCB_CAPTEI_bm;
 }
 
 void TCB3_init(void) {
@@ -244,36 +240,35 @@ int main(void) {
                 }
                 case 't': 
                 case 'T': {
-                    float period_us = (float)timerPeriod / 10.0; // 10MHz clock = 0.1us per tick
-                    sprintf(str_buffer, "Timer period = %.1f us\n", period_us);
+                    sprintf(str_buffer, "Timer period = %u us\n", clocksT/10);
                     sendmsg(str_buffer);
                     break;
                 }
                 case 'H': 
                 case 'h': {
-                    uint16_t high_us = highPulseWidth / 10; // 10MHz clock = 0.1us per tick
-                    sprintf(str_buffer, "High pulse = %.1d us\n", high_us);
+                    sprintf(str_buffer, "High pulse = %.1d us\n", clocksP/10);
                     sendmsg(str_buffer);
                     break;
                 }
                 case 'L': 
                 case 'l': {
-                    uint16_t low_us = (timerPeriod - highPulseWidth) / 10.0;
+                    uint16_t low_us = clocksT - clocksP;
                     sprintf(str_buffer, "Low pulse = %.1d us\n", low_us);
                     sendmsg(str_buffer);
                     break;
                 }
                 case 'd': 
                 case 'D': {
+	                newDistanceData = 0;
 	                if(pulseWidth > 0) {
-		                uint32_t distance_mm = (pulseWidth * 343) / 2000; // Corrected formula
-		                if(distance_mm >= 20 && distance_mm <= 4000) {
+		                uint32_t distance_mm = pulseWidth / 58;
+		                if(distance_mm >= 20 && distance_mm <= 4000000) {
 			                sprintf(str_buffer, "Distance = %lu mm\n", distance_mm);
 			                } else {
-			                sprintf(str_buffer, "Out of range\n");
+			                sprintf(str_buffer, "Out of range  %lu \n", distance_mm);
 		                }
 		                } else {
-		                sprintf(str_buffer, "No echo\n");
+		                sprintf(str_buffer, "No echo %u \n", pulseWidth);
 	                }
 	                sendmsg(str_buffer);
 	                break;
@@ -397,7 +392,7 @@ int main(void) {
         if (continuousDistance && newDistanceData==1) {
 	        newDistanceData = 0;
 	        if(pulseWidth > 0) {
-		        uint32_t distance_mm = (pulseWidth * 343UL) / 2000;
+		        uint32_t distance_mm = (pulseWidth * 343) / 2000;
 		        if(distance_mm >= 20 && distance_mm <= 4000000) {
 			        sprintf(str_buffer, "Distance = %d mm\n", distance_mm);
 			        } else {
@@ -456,90 +451,24 @@ void Set_Clear_Ports(uint8_t set) {
 
 /* Use this ISR to capture the HC-SR04 Pulse Width, which can be used to calculate the distance to an object */
 ISR(TCB0_INT_vect) {
+	uint32_t clocks;
 	TCB0.INTFLAGS = TCB_CAPT_bm; /* Clear the interrupt flag */
 	
 	PORTA.OUTTGL = PIN2_bm; // LED 9, LED to check if this triggers and make sure im not going insane
-	pulseWidth = TCB0.CCMP;		/* Convert to microseconds */
+	clocks = TCB0.CCMP;
+	pulseWidth = clocks;		/* Convert to microseconds */
 	newDistanceData = 1;
-	
-
-	
-	
-	if (pulseWidth > 100){
-		LED_Array[2].LED_PORT->OUTSET = LED_Array[2].bit_mapping;
-	}
-	else {
-		LED_Array[2].LED_PORT->OUTCLR = LED_Array[2].bit_mapping;
-	}
-	
-	if (pulseWidth > 350) {
-		LED_Array[3].LED_PORT->OUTSET = LED_Array[3].bit_mapping;
-	}
-	else {
-		LED_Array[3].LED_PORT->OUTCLR = LED_Array[3].bit_mapping;
-	}
 }
 
 /* Use this ISR to capture the 555 Period and High Pulse Width number of clocks, which can be used to calculate the Period and high and low pulse times */
 ISR(TCB2_INT_vect) {
-	static uint8_t edge = 0;
-	static uint16_t lastCap = 0;
-	uint16_t cap = TCB2.CCMP;
-	TCB2.INTFLAGS = TCB_CAPT_bm;
-
-	if (!edge) {
-		highPulseWidth = cap - lastCap;
-		// switch to falling
-		TCB2.EVCTRL |= TCB_EDGE_bm;
-		edge = 1;
-		} else {
-		lowPulseWidth = cap - lastCap;
-		// switch to rising
-		TCB2.EVCTRL &= ~TCB_EDGE_bm;
-		timerPeriod = highPulseWidth + lowPulseWidth;
-		edge = 0;
-	}
-	lastCap = cap;
-	newTimeData = 1;
-//////
-	uint16_t clocksP, clocksT, Pulse_Width, Time_Period;
 
 	TCB2.INTFLAGS = TCB_CAPT_bm; /* Clear the interrupt flag */
 
 	clocksT = TCB2.CNT;			/* In PW - Freq mode. CNT stops on the trailing edge until CCMP is read. Read order is important */
 	clocksP = TCB2.CCMP;
-	
-	Pulse_Width = clocksP/10;		/* Convert to microseconds */
-	Time_Period = clocksT/10;		/* To microseconds */
 
-	/*
-	if (Pulse_Width > 100){
-		LED_Array[2].LED_PORT->OUTSET = LED_Array[2].bit_mapping;
-	}
-	else {
-		LED_Array[2].LED_PORT->OUTCLR = LED_Array[2].bit_mapping;
-	}
-	
-	if (Pulse_Width > 350) {
-		LED_Array[3].LED_PORT->OUTSET = LED_Array[3].bit_mapping;
-	}
-	else {
-		LED_Array[3].LED_PORT->OUTCLR = LED_Array[3].bit_mapping;
-	}
-	
-	if (Time_Period > 100){
-		LED_Array[4].LED_PORT->OUTSET = LED_Array[4].bit_mapping;
-	}
-	else {
-		LED_Array[4].LED_PORT->OUTCLR = LED_Array[4].bit_mapping;
-	}
-	
-	if (Time_Period > 350) {
-		LED_Array[5].LED_PORT->OUTSET = LED_Array[5].bit_mapping;
-	}
-	else {
-		LED_Array[5].LED_PORT->OUTCLR = LED_Array[5].bit_mapping;
-	*/
+	newTimeData = 1;
 }
 
 
@@ -569,7 +498,7 @@ ISR(TCB3_INT_vect) {
     if (!ServoFollowADC) {
         if (servoDelayTarget > 0) {
             servoDelayCount++;
-            if (servoDelayCount >= servoDelayTarget) {
+            if (servoDelayCount >= servoDelayTarget*2) {
                 servoDelayCount = 0;
                 
                 // Move servo to next position
