@@ -2,7 +2,9 @@
  * Project2_us.c
  *
  * Created: 11/03/2025 17:37:30
- * Author : Ciaran.MacNamee
+ * Finished: 01/05/2025 12:01
+ * Author : Robert McGarvey, Ciaran Byrnes, Edgar Katelovic
+ * ID: 20270003, 23365781, 23391782
  */ 
 
 #include <avr/io.h>
@@ -39,19 +41,16 @@ uint8_t ServoFollowADC;      /* Servo position based on ADC0 RES value */
 
 // Additional global variables
 #define SERVO_MIN 500	// 1ms pulse (0 degrees) 
-#define SERVO_MAX 3200	// 2ms pulse (180 degrees)
+#define SERVO_MAX 3100	// 2ms pulse (180 degrees)
 #define SERVO_STEP (SERVO_MAX-SERVO_MIN)/24	// should move from -90 to +90 in 25 steps // EXAMPLE circuit was 63
 
-volatile uint16_t servoPosition = 1250;  // Initial position (1.5ms)
+volatile uint32_t servoPosition = 1250;  // Initial position (1.5ms)
 volatile uint8_t servoDirection = 1;     // 1 for increasing, 0 for decreasing
 volatile uint16_t servoDelayCount = 0;		// counter to compare to servoDelayTarget
 volatile uint16_t servoDelayTarget = 0; // Initial Delay between steps, 0 for off, 1.0s per step
-volatile uint16_t clocksP, clocksT;
-
+volatile uint16_t clocksP = 0;
+volatile uint16_t clocksT = 0;
 volatile uint16_t pulseWidth = 0;        // For HC-SR04
-volatile uint16_t timerPeriod = 0;       // For 555 timer
-volatile uint16_t highPulseWidth = 0;    // For 555 timer
-volatile uint16_t lowPulseWidth = 0;
 
 void CLOCK_init(void);
 void InitialiseLED_PORT_bits(void);
@@ -78,7 +77,6 @@ void CLOCK_init(void) {
 	 PORTA.DIRSET = PIN3_bm | PIN2_bm | PIN1_bm | PIN0_bm; /*(1<<1) | (1<<0);   0x0f; */      /* PA1-UNO D7, PA0 - UNO D2, PA2- LED8, PA3 - LED9  */
 	 PORTB.DIRSET = PIN2_bm; /*0x04;*/		/* PB2 - UNO D5 */
 	 PORTF.DIRSET = PIN5_bm | PIN4_bm; /*(1<<5) | (1<<4);   0x30; */		/* PF5 - UNO D3, PF4 UNO D6 */
-	 //PORTB.DIRCLR = PIN0_bm;  // PB0 as input (Echo)
  }
 
 void USART3_init(void) {
@@ -126,18 +124,18 @@ void Initialise_TCB0_ICP_PW() { // distance sensor
 	TCB0.INTCTRL = TCB_CAPT_bm;
 }
 
-void Initialise_TCB2_ICP_PWFRQ() { // 555 yoke
+void Initialise_TCB2_ICP_PWFRQ() { 
 	/* Enable TCB0 and set CLK_PER divider to 2: Timer clock = 10MHz now */
-	TCB0.CTRLA = TCB_CLKSEL_CLKDIV2_gc | TCB_ENABLE_bm;
+	TCB2.CTRLA = TCB_CLKSEL_CLKDIV2_gc | TCB_ENABLE_bm;
 	
 	/* Configure TCB0 in Input Capture Clock Frequency Measurement mode */
-	TCB0.CTRLB = TCB_CNTMODE_FRQPW_gc;
+	TCB2.CTRLB = TCB_CNTMODE_FRQPW_gc;
 	
 	/* Enable Capture or Timeout interrupt */
-	TCB0.INTCTRL = TCB_CAPT_bm;
+	TCB2.INTCTRL = TCB_CAPT_bm;
 	
 	/* Enable Event Input and Event Edge*/
-	TCB0.EVCTRL = TCB_CAPTEI_bm;
+	TCB2.EVCTRL = TCB_CAPTEI_bm;
 }
 
 void TCB3_init(void) {
@@ -240,13 +238,13 @@ int main(void) {
                 }
                 case 't': 
                 case 'T': {
-                    sprintf(str_buffer, "Timer period = %u us\n", clocksT/10);
+                    sprintf(str_buffer, "Timer period = %u us\n", clocksT);
                     sendmsg(str_buffer);
                     break;
                 }
                 case 'H': 
                 case 'h': {
-                    sprintf(str_buffer, "High pulse = %.1d us\n", clocksP/10);
+                    sprintf(str_buffer, "High pulse = %.1d us\n", clocksP);
                     sendmsg(str_buffer);
                     break;
                 }
@@ -262,13 +260,13 @@ int main(void) {
 	                newDistanceData = 0;
 	                if(pulseWidth > 0) {
 		                uint32_t distance_mm = pulseWidth / 58;
-		                if(distance_mm >= 20 && distance_mm <= 4000000) {
+		                if(distance_mm >= 20 && distance_mm <= 850) {
 			                sprintf(str_buffer, "Distance = %lu mm\n", distance_mm);
 			                } else {
-			                sprintf(str_buffer, "Out of range  %lu \n", distance_mm);
+			                sprintf(str_buffer, "Out of range\n");
 		                }
 		                } else {
-		                sprintf(str_buffer, "No echo %u \n", pulseWidth);
+		                sprintf(str_buffer, "No echo\n");
 	                }
 	                sendmsg(str_buffer);
 	                break;
@@ -392,21 +390,20 @@ int main(void) {
         if (continuousDistance && newDistanceData==1) {
 	        newDistanceData = 0;
 	        if(pulseWidth > 0) {
-		        uint32_t distance_mm = (pulseWidth * 343) / 2000;
-		        if(distance_mm >= 20 && distance_mm <= 4000000) {
-			        sprintf(str_buffer, "Distance = %d mm\n", distance_mm);
+		        uint32_t distance_mm = pulseWidth / 58;
+		        if(distance_mm >= 20 && distance_mm <= 850) {
+			        sprintf(str_buffer, "Distance = %lu mm\n", distance_mm);
 			        } else {
-			        sprintf(str_buffer, "Out of range%u \n", pulseWidth);
+			        sprintf(str_buffer, "Out of range\n");
 		        }
 		        } else {
-		        sprintf(str_buffer, "No echo %u \n", pulseWidth);
+		        sprintf(str_buffer, "No echo\n");
 	        }
 	        sendmsg(str_buffer);
         }
         else if (continuousTime && newTimeData) {
             newTimeData = 0;
-            uint16_t period_us = timerPeriod / 10;
-            sprintf(str_buffer, "Timer period = %.1d us\n", period_us);
+            sprintf(str_buffer, "Timer period = %.1d us\n", clocksT);
             sendmsg(str_buffer);
         }
         else if (continuousVolts && newADC0Data) {
@@ -416,7 +413,7 @@ int main(void) {
             sendmsg(str_buffer);
         }
 		else if (continuousServoPos && (newADC0Data || (servoDelayTarget >= 0 && servoDelayCount == 0))) {
-			sprintf(str_buffer, "Servo position = %d\n", servoPosition);
+			sprintf(str_buffer, "Servo position = %lu \n", servoPosition);
 			sendmsg(str_buffer);
 		}
     }
@@ -454,29 +451,43 @@ ISR(TCB0_INT_vect) {
 	uint32_t clocks;
 	TCB0.INTFLAGS = TCB_CAPT_bm; /* Clear the interrupt flag */
 	
-	PORTA.OUTTGL = PIN2_bm; // LED 9, LED to check if this triggers and make sure im not going insane
+	//LED_Array[8].LED_PORT->OUTTGL = LED_Array[8].bit_mapping; // LED 9, Debug led to ensure the ISR triggers
 	clocks = TCB0.CCMP;
 	pulseWidth = clocks;		/* Convert to microseconds */
 	newDistanceData = 1;
+	
+	if (adc_reading > 300) {
+		PORTA.OUTSET = PIN1_bm; // LED 7 on
+		} else {
+		PORTA.OUTCLR = PIN1_bm; // LED 7 off
+	}
+	
 }
 
 /* Use this ISR to capture the 555 Period and High Pulse Width number of clocks, which can be used to calculate the Period and high and low pulse times */
 ISR(TCB2_INT_vect) {
 
 	TCB2.INTFLAGS = TCB_CAPT_bm; /* Clear the interrupt flag */
+	// LED_Array[9].LED_PORT->OUTTGL = LED_Array[9].bit_mapping; Debug led to ensure the ISR triggers
 
-	clocksT = TCB2.CNT;			/* In PW - Freq mode. CNT stops on the trailing edge until CCMP is read. Read order is important */
-	clocksP = TCB2.CCMP;
+
+	clocksT = TCB2.CNT/10;			/* In PW - Freq mode. CNT stops on the trailing edge until CCMP is read. Read order is important */
+	clocksP = TCB2.CCMP/10;
 
 	newTimeData = 1;
+	
+	if (clocksT > 300) {
+		LED_Array[6].LED_PORT->OUTSET = LED_Array[6].bit_mapping; // LED 6 on
+		} else {
+		LED_Array[6].LED_PORT->OUTCLR = LED_Array[6].bit_mapping; // LED 6 off
+	}
 }
 
 
 ISR(TCB3_INT_vect) {
     TCB3.INTFLAGS = TCB_CAPT_bm;	/* Software clears the INTFLAG */
 	
-    PORTA.OUTTGL = PIN3_bm; // led 10, LED to check if this triggers and make sure im not going insane
-    
+  
 	static uint8_t timeoutCount = 0;
 	static uint8_t triggerCount = 0;
 	
@@ -498,7 +509,7 @@ ISR(TCB3_INT_vect) {
     if (!ServoFollowADC) {
         if (servoDelayTarget > 0) {
             servoDelayCount++;
-            if (servoDelayCount >= servoDelayTarget*2) {
+            if (servoDelayCount >= servoDelayTarget*10) {
                 servoDelayCount = 0;
                 
                 // Move servo to next position
@@ -526,9 +537,9 @@ ISR(ADC0_RESRDY_vect) {
 	
 	// Set LED[7] based on ADC reading
 	if (adc_reading > 512) {
-		PORTA.OUTSET = PIN1_bm; // LED 7 on
+		LED_Array[7].LED_PORT->OUTSET = LED_Array[7].bit_mapping; // LED 7 on
 		} else {
-		PORTA.OUTCLR = PIN1_bm; // LED 7 off
+		LED_Array[7].LED_PORT->OUTCLR = LED_Array[7].bit_mapping; // LED 7 off
 	}
 	
 	// If in follow ADC mode, set servo position
